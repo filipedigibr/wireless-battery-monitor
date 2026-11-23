@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>KSnakeBatteryTray</AssemblyName>
+    <RootNamespace>KSnakeBatteryTray</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <StartupObject>KSnakeBatteryTray.Program</StartupObject>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <Version>1.0.0</Version>
+    <Product>Monitor de Bateria Wireless &amp; Bluetooth</Product>
+    <Company>Wireless Battery Monitor</Company>
+    <DefaultItemExcludes>$(DefaultItemExcludes);Installer\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+</Project>

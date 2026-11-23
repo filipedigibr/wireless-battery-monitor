@@ -1,0 +1,10 @@
+bin/
+obj/
+dist/
+release-installer/
+Installer/bin/
+Installer/obj/
+Installer/Payload/
+WirelessBatterySetup.exe
+.vs/
+*.user
