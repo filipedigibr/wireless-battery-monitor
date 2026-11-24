@@ -10,7 +10,7 @@
     <RootNamespace>WirelessBatterySetup</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>..\Assets\app.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <Product>Instalador — Monitor de Bateria Wireless &amp; Bluetooth</Product>
     <Company>Wireless Battery Monitor</Company>
   </PropertyGroup>

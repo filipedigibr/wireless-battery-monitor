@@ -1,8 +1,8 @@
-# Monitor de Bateria Wireless & Bluetooth (v1.0.0)
+# Monitor de Bateria Wireless & Bluetooth (v1.0.1)
 
 Aplicação leve em C# (.NET 10) para exibir na barra de tarefas (System Tray) do Windows o nível de bateria de **múltiplos dispositivos** simultaneamente — incluindo **K-Snake X11 Pro** (Wireless 2.4 GHz com push instantâneo e USB-C), outros mouses Bluetooth LE e fones/periféricos Bluetooth.
 
-## Recursos (v1.0.0)
+## Recursos (v1.0.1)
 
 - **Painel rápido (Flyout Windows 11):** clique esquerdo no ícone abre um pop-up elegante colado na barra de tarefas com cartões de bateria, DPI/Hz, estimativa de autonomia e mini gráfico de histórico.
 - **Atualizações em tempo real (HID Push):** detecta instantaneamente no K-Snake X11 Pro mudanças de bateria, entrada/saída da base de carregamento, troca de DPI, Polling Rate (125–1000 Hz) e modo repouso.
