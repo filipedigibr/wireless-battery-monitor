@@ -40,6 +40,11 @@ public sealed class AppSettings
     public bool ShowDeviceTypeBadge { get; set; } = true;
 
     /// <summary>
+    /// Filters momentary ADC voltage recovery rebounds so battery percentage never creeps upward while discharging.
+    /// </summary>
+    public bool StabilizeBatteryReading { get; set; } = true;
+
+    /// <summary>
     /// Optional pinned DeviceId when using single-icon mode. Null/empty = automatic (lowest battery).
     /// </summary>
     public string? PreferredDeviceId { get; set; }

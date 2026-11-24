@@ -10,7 +10,7 @@ namespace WirelessBatterySetup;
 
 internal static class SetupProgram
 {
-    internal const string AppVersion = "1.0.1";
+    internal const string AppVersion = "1.0.2";
     internal const string DisplayName = "Monitor de Bateria Wireless & Bluetooth";
     internal const string Publisher = "Wireless Battery Monitor";
     internal const string UninstallKeyName = "WirelessBatteryMonitor";

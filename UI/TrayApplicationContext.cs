@@ -230,6 +230,20 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
         menu.Items.Add(typeBadgeItem);
 
+        var stabilizeItem = new ToolStripMenuItem("Estabilizar leitura da bateria")
+        {
+            Checked = _settings.StabilizeBatteryReading,
+            CheckOnClick = true
+        };
+        stabilizeItem.Click += async (_, _) =>
+        {
+            _settings.StabilizeBatteryReading = stabilizeItem.Checked;
+            _settings.Save();
+            _service.ResetStabilizer();
+            await TriggerRefreshAsync();
+        };
+        menu.Items.Add(stabilizeItem);
+
         // Icon style submenu
         var styleMenu = new ToolStripMenuItem("Estilo do ícone");
         AddStyleOption(styleMenu, "Bateria + Número", TrayIconStyle.BatteryAndNumber);

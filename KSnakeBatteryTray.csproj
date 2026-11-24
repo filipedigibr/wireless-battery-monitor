@@ -12,7 +12,7 @@
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <StartupObject>KSnakeBatteryTray.Program</StartupObject>
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <Product>Monitor de Bateria Wireless &amp; Bluetooth</Product>
     <Company>Wireless Battery Monitor</Company>
     <DefaultItemExcludes>$(DefaultItemExcludes);Installer\**</DefaultItemExcludes>

@@ -10,6 +10,7 @@ public sealed class MouseBatteryService : IDisposable
     private readonly YjxHidProvider _hidProvider = new();
     private readonly BluetoothBatteryProvider _btProvider = new();
     private readonly BatteryHistoryStore _history = new();
+    private readonly BatteryStabilizer _stabilizer = new();
     private readonly SemaphoreSlim _pollLock = new(1, 1);
     private readonly Queue<string> _diagnosticLog = new();
     private readonly object _logLock = new();
@@ -44,6 +45,8 @@ public sealed class MouseBatteryService : IDisposable
         }
     }
 
+    public void ResetStabilizer() => _stabilizer.ClearAll();
+
     public void ReapplyPresentationSettings()
     {
         List<BatteryReading> updated;
@@ -70,10 +73,6 @@ public sealed class MouseBatteryService : IDisposable
             var hidResult = hidTask.Result;
             var btResult = btTask.Result;
 
-            AppendLog(hidResult.DiagnosticLine);
-            foreach (var line in btResult.DiagnosticLines)
-                AppendLog(line);
-
             if (!string.IsNullOrEmpty(hidResult.FirmwareVersion) && hidResult.FirmwareVersion != "0.0.0")
                 _lastKnownX11Firmware = hidResult.FirmwareVersion;
             else if (!hidResult.DeviceFound)
@@ -88,28 +87,45 @@ public sealed class MouseBatteryService : IDisposable
             // 1) K-Snake X11 Pro via USB-C Wired or 2.4 GHz Dongle
             if (hidResult.DeviceFound && hidResult.IsOnline && hidResult.Mode is ConnectionMode.Wired or ConnectionMode.Wireless24G)
             {
-                if (hidResult.BatteryPercent is int pct)
+                int? displayPct = _lastKnownX11Battery;
+                string diagLine = hidResult.DiagnosticLine;
+
+                if (hidResult.BatteryPercent is int rawPct)
                 {
-                    _lastKnownX11Battery = pct;
+                    int stablePct = _stabilizer.Filter("yjx:x11", rawPct, hidResult.IsCharging, _settings.StabilizeBatteryReading);
+                    displayPct = stablePct;
+                    _lastKnownX11Battery = stablePct;
                     _lastKnownX11Charging = hidResult.IsCharging;
-                    _history.Record("yjx:x11", pct, hidResult.IsCharging);
+                    _history.Record("yjx:x11", stablePct, hidResult.IsCharging);
+
+                    if (stablePct != rawPct)
+                        diagLine = $"{hidResult.DiagnosticLine} [estabilizado: {stablePct}%]";
                 }
 
-                string? estimate = _history.EstimateRemainingLabel("yjx:x11", hidResult.BatteryPercent ?? _lastKnownX11Battery, hidResult.IsCharging);
+                AppendLog(diagLine);
+
+                string? estimate = _history.EstimateRemainingLabel("yjx:x11", displayPct, hidResult.IsCharging);
                 readings.Add(ApplyCustomization(new BatteryReading(
                     "yjx:x11",
                     hidResult.Mode,
                     DeviceKind.Mouse,
                     "K-Snake X11 Pro",
-                    hidResult.BatteryPercent ?? _lastKnownX11Battery,
+                    displayPct,
                     hidResult.IsCharging,
                     _lastKnownX11Firmware,
                     DateTime.Now,
-                    hidResult.DiagnosticLine,
+                    diagLine,
                     _lastKnownX11Dpi,
                     _lastKnownX11PollingHz,
                     estimate)));
             }
+            else
+            {
+                AppendLog(hidResult.DiagnosticLine);
+            }
+
+            foreach (var line in btResult.DiagnosticLines)
+                AppendLog(line);
 
             // 2) ALL connected Bluetooth devices (BLE mice/keyboards + Classic BT audio/headsets)
             bool hasX11OverBluetooth = false;
@@ -120,10 +136,14 @@ public sealed class MouseBatteryService : IDisposable
                 if (isX11Bt)
                     hasX11OverBluetooth = true;
 
-                if (bt.BatteryPercent is int btPct)
-                    _history.Record(bt.DeviceId, btPct, false);
+                int? btDisplayPct = bt.BatteryPercent;
+                if (bt.BatteryPercent is int rawBtPct)
+                {
+                    btDisplayPct = _stabilizer.Filter(bt.DeviceId, rawBtPct, false, _settings.StabilizeBatteryReading);
+                    _history.Record(bt.DeviceId, btDisplayPct.Value, false);
+                }
 
-                string? estimate = _history.EstimateRemainingLabel(bt.DeviceId, bt.BatteryPercent, false);
+                string? estimate = _history.EstimateRemainingLabel(bt.DeviceId, btDisplayPct, false);
 
                 string? btFw = !string.IsNullOrEmpty(bt.FirmwareVersion)
                     ? bt.FirmwareVersion
@@ -134,7 +154,7 @@ public sealed class MouseBatteryService : IDisposable
                     ConnectionMode.Bluetooth,
                     bt.Kind,
                     bt.DeviceName,
-                    bt.BatteryPercent,
+                    btDisplayPct,
                     false,
                     btFw,
                     DateTime.Now,
@@ -185,17 +205,24 @@ public sealed class MouseBatteryService : IDisposable
 
     private void OnHidPushEvent(YjxHidProvider.HidPushEvent push)
     {
-        if (!string.IsNullOrEmpty(push.LogLine))
-            AppendLog(push.LogLine);
-
-        if (push.BatteryPercent is int p)
-            _lastKnownX11Battery = p;
         if (push.IsCharging is bool chg)
             _lastKnownX11Charging = chg;
         if (push.Dpi is int d)
             _lastKnownX11Dpi = d;
         if (push.PollingRateHz is int hz)
             _lastKnownX11PollingHz = hz;
+
+        string? logLine = push.LogLine;
+        if (push.BatteryPercent is int rawP)
+        {
+            int stableP = _stabilizer.Filter("yjx:x11", rawP, _lastKnownX11Charging, _settings.StabilizeBatteryReading);
+            _lastKnownX11Battery = stableP;
+            if (stableP != rawP && !string.IsNullOrEmpty(logLine))
+                logLine = $"{logLine} [estabilizado: {stableP}%]";
+        }
+
+        if (!string.IsNullOrEmpty(logLine))
+            AppendLog(logLine);
 
         if (_lastKnownX11Battery is int batVal && push.IsOnline != false)
             _history.Record("yjx:x11", batVal, _lastKnownX11Charging);
