@@ -123,8 +123,16 @@ public sealed class YjxHidProvider : IDisposable
                 var verResp = await SendCommandAsync([0x00, 0x55, 0x03], 0x03, 500, ct);
                 if (verResp is not null && verResp.Length >= 27)
                 {
-                    static char DigitOrZero(byte b) => (b >= '0' && b <= '9') ? (char)b : '0';
-                    _cachedFirmware = $"{DigitOrZero(verResp[24])}.{DigitOrZero(verResp[25])}.{DigitOrZero(verResp[26])}";
+                    bool hasValidDigit = (verResp[24] is >= (byte)'0' and <= (byte)'9')
+                                      || (verResp[25] is >= (byte)'0' and <= (byte)'9')
+                                      || (verResp[26] is >= (byte)'0' and <= (byte)'9');
+                    if (hasValidDigit)
+                    {
+                        static char DigitOrZero(byte b) => (b >= '0' && b <= '9') ? (char)b : '0';
+                        string parsed = $"{DigitOrZero(verResp[24])}.{DigitOrZero(verResp[25])}.{DigitOrZero(verResp[26])}";
+                        if (parsed != "0.0.0")
+                            _cachedFirmware = parsed;
+                    }
                 }
             }
 
@@ -275,6 +283,9 @@ public sealed class YjxHidProvider : IDisposable
         _activeHandle = null;
         _activePath = null;
         _activeMode = ConnectionMode.Disconnected;
+        _cachedFirmware = null;
+        _lastDpi = null;
+        _lastPollingRateHz = null;
 
         if (handle is not null)
         {

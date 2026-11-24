@@ -6,7 +6,8 @@ namespace KSnakeBatteryTray.Services;
 
 /// <summary>
 /// Persists recent battery telemetry per device (last 72 hours) and estimates
-/// remaining battery life or time until full charge based on observed drain/charge rates.
+/// remaining battery life or time until full charge using Ordinary Least Squares (OLS)
+/// linear regression over the active session, resilient to voltage jitter and manual refreshes.
 /// </summary>
 public sealed class BatteryHistoryStore
 {
@@ -51,13 +52,14 @@ public sealed class BatteryHistoryStore
             else
             {
                 var last = list[^1];
-                bool stateChanged = last.Percent != percent || last.IsCharging != isCharging;
+                bool chargingChanged = last.IsCharging != isCharging;
+                bool percentChanged = last.Percent != percent;
                 bool intervalElapsed = (now - last.TimestampUtc) >= TimeSpan.FromMinutes(10);
 
-                if (stateChanged || intervalElapsed)
+                if (chargingChanged || percentChanged || intervalElapsed)
                 {
-                    // Avoid flooding if percentage fluctuates rapidly within 15 seconds
-                    if (stateChanged && (now - last.TimestampUtc) < TimeSpan.FromSeconds(15) && last.IsCharging == isCharging)
+                    // Avoid flooding if percentage fluctuates within 45 seconds without changing charging state
+                    if (!chargingChanged && percentChanged && (now - last.TimestampUtc) < TimeSpan.FromSeconds(45))
                     {
                         list[^1] = new BatterySample(now, percent, isCharging);
                     }
@@ -100,77 +102,113 @@ public sealed class BatteryHistoryStore
         List<BatterySample> samples;
         lock (_lock)
         {
-            if (!_history.TryGetValue(deviceId, out var list) || list.Count < 2)
+            if (!_history.TryGetValue(deviceId, out var list) || list.Count < 3)
                 return null;
             samples = list.ToList();
         }
 
-        // Walk backwards to find the start of the current contiguous charging/discharging session
-        // (ignoring gaps > 3 hours where the PC or mouse was turned off).
-        DateTime now = DateTime.UtcNow;
-        BatterySample anchor = samples[^1];
-        if (anchor.IsCharging != isCharging)
+        // Walk backwards to isolate the current contiguous charging/discharging session.
+        // Tolerates normal +/-2-5% LiPo voltage jitter and only splits on real charging transitions,
+        // long idle gaps (>4h), or sustained external charge/discharge jumps (>=10%).
+        int endIdx = samples.Count - 1;
+        if (samples[endIdx].IsCharging != isCharging)
             return null;
 
-        BatterySample? earliest = null;
-        for (int i = samples.Count - 2; i >= 0; i--)
+        int startIdx = endIdx;
+        for (int i = endIdx - 1; i >= 0; i--)
         {
             var s = samples[i];
             if (s.IsCharging != isCharging)
                 break;
 
             var gap = samples[i + 1].TimestampUtc - s.TimestampUtc;
-            if (gap > TimeSpan.FromHours(3))
+            if (gap > TimeSpan.FromHours(4))
                 break;
 
-            // Stop at a session boundary where battery jumped in the opposite direction (e.g. charged externally)
-            if (!isCharging && s.Percent < samples[i + 1].Percent - 2)
+            // Detect sustained opposite jump (>=10% comparing local medians across the step)
+            double leftMed = LocalMedianPercent(samples, Math.Max(0, i - 2), i);
+            double rightMed = LocalMedianPercent(samples, i + 1, Math.Min(endIdx, i + 3));
+
+            if (!isCharging && (rightMed - leftMed) >= 10.0)
                 break;
-            if (isCharging && s.Percent > samples[i + 1].Percent + 2)
+            if (isCharging && (leftMed - rightMed) >= 10.0)
                 break;
 
-            earliest = s;
+            startIdx = i;
         }
 
-        if (earliest is null)
+        int count = endIdx - startIdx + 1;
+        if (count < 3)
             return null;
 
-        double elapsedHours = (now - earliest.TimestampUtc).TotalHours;
-        if (elapsedHours < 0.05) // Need at least ~3 minutes of data
+        // Anchor the regression purely on recorded sample timestamps (NOT DateTime.UtcNow),
+        // so manual "Atualizar agora" clicks never artificially inflate the remaining estimate.
+        DateTime t0 = samples[startIdx].TimestampUtc;
+        DateTime tLast = samples[endIdx].TimestampUtc;
+        double spanHours = (tLast - t0).TotalHours;
+
+        double minSpanHours = isCharging ? (5.0 / 60.0) : (20.0 / 60.0);
+        if (spanHours < minSpanHours)
             return null;
+
+        // Ordinary Least Squares (OLS) linear regression: y(t) = a + b*t (t in hours, y in %)
+        double sumX = 0, sumY = 0, sumXX = 0, sumXY = 0;
+        for (int i = startIdx; i <= endIdx; i++)
+        {
+            double x = (samples[i].TimestampUtc - t0).TotalHours;
+            double y = samples[i].Percent;
+            sumX += x;
+            sumY += y;
+            sumXX += x * x;
+            sumXY += x * y;
+        }
+
+        double denom = count * sumXX - sumX * sumX;
+        if (denom <= 1e-9)
+            return null;
+
+        double slopePerHour = (count * sumXY - sumX * sumY) / denom;
+        double fittedDelta = slopePerHour * spanHours;
 
         if (isCharging)
         {
-            int gained = pct - earliest.Percent;
-            if (gained < 2)
+            if (slopePerHour < 1.0 || fittedDelta < 2.0)
                 return null;
 
-            double ratePerHour = gained / elapsedHours;
-            if (ratePerHour <= 0.5)
-                return null;
-
-            double hoursToFull = (100 - pct) / ratePerHour;
-            if (hoursToFull < 0.05 || hoursToFull > 12)
+            double hoursToFull = (100.0 - pct) / slopePerHour;
+            if (hoursToFull < 0.05 || hoursToFull > 12.0)
                 return null;
 
             return $"~{FormatDuration(TimeSpan.FromHours(hoursToFull))} até 100%";
         }
         else
         {
-            int drained = earliest.Percent - pct;
-            if (drained < 2)
-                return null;
-
-            double drainPerHour = drained / elapsedHours;
-            if (drainPerHour <= 0.1)
+            double drainPerHour = -slopePerHour;
+            if (drainPerHour < 0.15 || -fittedDelta < 2.0)
                 return null;
 
             double hoursLeft = pct / drainPerHour;
-            if (hoursLeft < 0.1 || hoursLeft > 200)
+            if (hoursLeft < 0.1 || hoursLeft > 200.0)
                 return null;
 
             return $"~{FormatDuration(TimeSpan.FromHours(hoursLeft))} restantes";
         }
+    }
+
+    private static double LocalMedianPercent(List<BatterySample> samples, int from, int to)
+    {
+        int len = to - from + 1;
+        if (len <= 0) return 0;
+        if (len == 1) return samples[from].Percent;
+
+        Span<int> vals = len <= 8 ? stackalloc int[len] : new int[len];
+        for (int k = 0; k < len; k++)
+            vals[k] = samples[from + k].Percent;
+        vals.Sort();
+
+        return (len % 2 == 1)
+            ? vals[len / 2]
+            : (vals[len / 2 - 1] + vals[len / 2]) / 2.0;
     }
 
     public void Flush()

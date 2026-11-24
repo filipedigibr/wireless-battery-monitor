@@ -74,8 +74,10 @@ public sealed class MouseBatteryService : IDisposable
             foreach (var line in btResult.DiagnosticLines)
                 AppendLog(line);
 
-            if (!string.IsNullOrEmpty(hidResult.FirmwareVersion))
+            if (!string.IsNullOrEmpty(hidResult.FirmwareVersion) && hidResult.FirmwareVersion != "0.0.0")
                 _lastKnownX11Firmware = hidResult.FirmwareVersion;
+            else if (!hidResult.DeviceFound)
+                _lastKnownX11Firmware = null;
             if (hidResult.Dpi.HasValue)
                 _lastKnownX11Dpi = hidResult.Dpi;
             if (hidResult.PollingRateHz.HasValue)
@@ -123,6 +125,10 @@ public sealed class MouseBatteryService : IDisposable
 
                 string? estimate = _history.EstimateRemainingLabel(bt.DeviceId, bt.BatteryPercent, false);
 
+                string? btFw = !string.IsNullOrEmpty(bt.FirmwareVersion)
+                    ? bt.FirmwareVersion
+                    : (isX11Bt ? _lastKnownX11Firmware : null);
+
                 readings.Add(ApplyCustomization(new BatteryReading(
                     bt.DeviceId,
                     ConnectionMode.Bluetooth,
@@ -130,7 +136,7 @@ public sealed class MouseBatteryService : IDisposable
                     bt.DeviceName,
                     bt.BatteryPercent,
                     false,
-                    isX11Bt ? _lastKnownX11Firmware : null,
+                    btFw,
                     DateTime.Now,
                     bt.Detail,
                     null,

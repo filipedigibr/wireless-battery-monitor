@@ -441,8 +441,12 @@ internal sealed class MiniSparklinePanel : Panel
 
         for (int i = 0; i < n; i++)
         {
+            // Light 3-point moving average on interior points to smooth ±2% voltage jitter
+            float pct = (i > 0 && i < n - 1)
+                ? (slice[i - 1].Percent + slice[i].Percent * 2f + slice[i + 1].Percent) / 4f
+                : slice[i].Percent;
             float x = padX + (plotW * i / Math.Max(1, n - 1));
-            float y = padY + plotH * (1f - Math.Clamp(slice[i].Percent, 0, 100) / 100f);
+            float y = padY + plotH * (1f - Math.Clamp(pct, 0f, 100f) / 100f);
             pts[i] = new PointF(x, y);
         }
 

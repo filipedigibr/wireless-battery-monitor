@@ -9,11 +9,9 @@ using Windows.Storage.Streams;
 namespace KSnakeBatteryTray.Providers;
 
 /// <summary>
-/// Discovers all connected Bluetooth LE and Classic Bluetooth peripherals (mice, headsets, keyboards, etc.)
-/// and reads battery percentages via:
-///   1) AEP DEVPKEY_Bluetooth_Battery ({104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2)
-///   2) Windows PnP CfgMgr32 nodes sharing the device ContainerId (covers BTHLE, BTHENUM, HFP/Hands-Free)
-///   3) Direct WinRT GATT Battery Service (0x180F) -> Battery Level Characteristic (0x2A19) for BLE
+/// Discovers all connected Bluetooth LE and Classic Bluetooth peripherals (mice, headsets, keyboards, etc.),
+/// reads battery percentages via AEP/PnP DEVPKEY_Bluetooth_Battery or GATT Battery Service (0x180F/0x2A19),
+/// and reads firmware version universally from GATT Device Information Service (0x180A -> 0x2A26/0x2A28) for BLE devices.
 /// </summary>
 public sealed class BluetoothBatteryProvider
 {
@@ -34,11 +32,15 @@ public sealed class BluetoothBatteryProvider
         pid = 2
     };
 
+    // Per-device firmware cache (cleared automatically when a device disconnects)
+    private readonly Dictionary<string, string?> _firmwareCache = new(StringComparer.OrdinalIgnoreCase);
+
     public sealed record BluetoothDeviceReading(
         string DeviceId,
         string DeviceName,
         DeviceKind Kind,
         int? BatteryPercent,
+        string? FirmwareVersion,
         string Detail);
 
     public sealed record BluetoothScanResult(
@@ -52,7 +54,6 @@ public sealed class BluetoothBatteryProvider
 
         try
         {
-            // Build a single PnP ContainerId -> Battery map once per scan (fast & covers BLE + Classic HFP).
             var containerBatteryMap = BuildContainerBatteryMap();
 
             // 1) Scan Bluetooth LE devices
@@ -60,6 +61,10 @@ public sealed class BluetoothBatteryProvider
 
             // 2) Scan Classic Bluetooth devices (e.g. headphones/earbuds via HFP battery)
             await ScanClassicAsync(containerBatteryMap, byKey, diagnostics, ct);
+
+            // Evict cached firmware for disconnected devices so swapped/updated hardware reads fresh data
+            foreach (var cachedId in _firmwareCache.Keys.Where(k => !byKey.ContainsKey(k)).ToList())
+                _firmwareCache.Remove(cachedId);
 
             if (byKey.Count == 0 && diagnostics.Count == 0)
                 diagnostics.Add("BT: Nenhum dispositivo Bluetooth conectado com suporte a bateria.");
@@ -81,7 +86,7 @@ public sealed class BluetoothBatteryProvider
         return new BluetoothScanResult(ordered, diagnostics);
     }
 
-    private static async Task ScanBleAsync(
+    private async Task ScanBleAsync(
         Dictionary<Guid, int> containerBatteryMap,
         Dictionary<string, BluetoothDeviceReading> results,
         List<string> diagnostics,
@@ -121,43 +126,56 @@ public sealed class BluetoothBatteryProvider
                 detail.Append($" | PnP={pnpBat}%");
             }
 
-            // Strategy C: Direct WinRT GATT Battery Service (0x180F -> 0x2A19)
-            if (battery is null)
+            bool needBatteryGatt = battery is null;
+            bool needFirmwareGatt = !_firmwareCache.ContainsKey(dedupeKey);
+            string? firmware = _firmwareCache.TryGetValue(dedupeKey, out var cachedFw) ? cachedFw : null;
+
+            // Strategy C: Open BluetoothLEDevice when we need GATT Battery (0x180F) or one-time Firmware (0x180A)
+            if (needBatteryGatt || needFirmwareGatt)
             {
                 try
                 {
                     using var bleDevice = await BluetoothLEDevice.FromIdAsync(dev.Id).AsTask(ct);
                     if (bleDevice is not null && bleDevice.ConnectionStatus == BluetoothConnectionStatus.Connected)
                     {
-                        var batSvc = await bleDevice.GetGattServicesForUuidAsync(GattServiceUuids.Battery, BluetoothCacheMode.Uncached).AsTask(ct);
-                        if (batSvc.Status == GattCommunicationStatus.Success && batSvc.Services.Count > 0)
+                        if (needBatteryGatt)
                         {
-                            foreach (var svc in batSvc.Services)
+                            var batSvc = await bleDevice.GetGattServicesForUuidAsync(GattServiceUuids.Battery, BluetoothCacheMode.Uncached).AsTask(ct);
+                            if (batSvc.Status == GattCommunicationStatus.Success && batSvc.Services.Count > 0)
                             {
-                                using (svc)
+                                foreach (var svc in batSvc.Services)
                                 {
-                                    var chRes = await svc.GetCharacteristicsForUuidAsync(GattCharacteristicUuids.BatteryLevel, BluetoothCacheMode.Uncached).AsTask(ct);
-                                    if (chRes.Status == GattCommunicationStatus.Success && chRes.Characteristics.Count > 0)
+                                    using (svc)
                                     {
-                                        var rd = await chRes.Characteristics[0].ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct);
-                                        if (rd.Status == GattCommunicationStatus.Success && rd.Value is not null && rd.Value.Length >= 1)
+                                        var chRes = await svc.GetCharacteristicsForUuidAsync(GattCharacteristicUuids.BatteryLevel, BluetoothCacheMode.Uncached).AsTask(ct);
+                                        if (chRes.Status == GattCommunicationStatus.Success && chRes.Characteristics.Count > 0)
                                         {
-                                            using var reader = DataReader.FromBuffer(rd.Value);
-                                            byte pct = reader.ReadByte();
-                                            if (pct <= 100)
+                                            var rd = await chRes.Characteristics[0].ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct);
+                                            if (rd.Status == GattCommunicationStatus.Success && rd.Value is not null && rd.Value.Length >= 1)
                                             {
-                                                battery = pct;
-                                                detail.Append($" | GATT 0x180F={pct}%");
-                                                break;
+                                                using var reader = DataReader.FromBuffer(rd.Value);
+                                                byte pct = reader.ReadByte();
+                                                if (pct <= 100)
+                                                {
+                                                    battery = pct;
+                                                    detail.Append($" | GATT 0x180F={pct}%");
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            else if (isX11 || kind == DeviceKind.Mouse)
+                            {
+                                detail.Append(" | Sem serviço GATT 0x180F (firmware não informa bateria via BT)");
+                            }
                         }
-                        else if (isX11 || kind == DeviceKind.Mouse)
+
+                        if (needFirmwareGatt && (battery is not null || isX11 || kind == DeviceKind.Mouse))
                         {
-                            detail.Append(" | Sem serviço GATT 0x180F (firmware não informa bateria via BT)");
+                            firmware = await TryReadBleFirmwareAsync(bleDevice, isX11, ct);
+                            _firmwareCache[dedupeKey] = firmware;
                         }
                     }
                 }
@@ -167,17 +185,64 @@ public sealed class BluetoothBatteryProvider
                 }
             }
 
-            // Include if it reported battery OR if it's a connected mouse / X11 device
+            if (!string.IsNullOrEmpty(firmware))
+                detail.Append($" | FW={firmware}");
+
             if (battery is not null || isX11 || kind == DeviceKind.Mouse)
             {
                 var line = detail.ToString();
                 diagnostics.Add(line);
-                UpsertReading(results, dedupeKey, new BluetoothDeviceReading(dedupeKey, name, kind, battery, line));
+                UpsertReading(results, dedupeKey, new BluetoothDeviceReading(dedupeKey, name, kind, battery, firmware, line));
             }
         }
 
         if (connectedCount == 0)
             diagnostics.Add("BLE: Nenhum dispositivo Bluetooth LE conectado.");
+    }
+
+    private static async Task<string?> TryReadBleFirmwareAsync(BluetoothLEDevice bleDevice, bool preferSoftwareRevision, CancellationToken ct)
+    {
+        try
+        {
+            var devInfoSvc = await bleDevice.GetGattServicesForUuidAsync(GattServiceUuids.DeviceInformation, BluetoothCacheMode.Cached).AsTask(ct);
+            if (devInfoSvc.Status != GattCommunicationStatus.Success || devInfoSvc.Services.Count == 0)
+                return null;
+
+            Guid[] preferredOrder = preferSoftwareRevision
+                ? [GattCharacteristicUuids.SoftwareRevisionString, GattCharacteristicUuids.FirmwareRevisionString]
+                : [GattCharacteristicUuids.FirmwareRevisionString, GattCharacteristicUuids.SoftwareRevisionString];
+
+            foreach (var svc in devInfoSvc.Services)
+            {
+                using (svc)
+                {
+                    foreach (var charUuid in preferredOrder)
+                    {
+                        var chRes = await svc.GetCharacteristicsForUuidAsync(charUuid, BluetoothCacheMode.Cached).AsTask(ct);
+                        if (chRes.Status != GattCommunicationStatus.Success || chRes.Characteristics.Count == 0)
+                            continue;
+
+                        var rd = await chRes.Characteristics[0].ReadValueAsync(BluetoothCacheMode.Cached).AsTask(ct);
+                        if (rd.Status != GattCommunicationStatus.Success || rd.Value is null || rd.Value.Length == 0)
+                            continue;
+
+                        var bytes = new byte[rd.Value.Length];
+                        using (var reader = DataReader.FromBuffer(rd.Value))
+                            reader.ReadBytes(bytes);
+
+                        string cleaned = Encoding.UTF8.GetString(bytes).Trim('\0', ' ', '\r', '\n', '\t');
+                        if (!string.IsNullOrWhiteSpace(cleaned) && cleaned != "0.0.0" && cleaned != "0")
+                            return cleaned;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Non-fatal: device simply doesn't expose Device Information Service
+        }
+
+        return null;
     }
 
     private static async Task ScanClassicAsync(
@@ -214,12 +279,11 @@ public sealed class BluetoothBatteryProvider
                 source = $"PnP HFP={pnpBat}%";
             }
 
-            // Only include Classic BT devices that expose battery (headsets, earbuds, gamepads, etc.)
             if (battery is not null)
             {
                 string line = $"BT Clássico '{name}' | {source}";
                 diagnostics.Add(line);
-                UpsertReading(results, dedupeKey, new BluetoothDeviceReading(dedupeKey, name, kind, battery, line));
+                UpsertReading(results, dedupeKey, new BluetoothDeviceReading(dedupeKey, name, kind, battery, null, line));
             }
         }
     }
@@ -233,9 +297,9 @@ public sealed class BluetoothBatteryProvider
             return;
         }
 
-        // Prefer whichever entry actually has a battery percentage.
-        if (existing.BatteryPercent is null && incoming.BatteryPercent is not null)
-            map[key] = incoming;
+        int? bestBattery = existing.BatteryPercent ?? incoming.BatteryPercent;
+        string? bestFirmware = !string.IsNullOrEmpty(existing.FirmwareVersion) ? existing.FirmwareVersion : incoming.FirmwareVersion;
+        map[key] = existing with { BatteryPercent = bestBattery, FirmwareVersion = bestFirmware };
     }
 
     private static bool IsX11Name(string? name)
@@ -302,10 +366,7 @@ public sealed class BluetoothBatteryProvider
                 }
             }
         }
-        catch
-        {
-            // Non-fatal fallback
-        }
+        catch { }
 
         return map;
     }
